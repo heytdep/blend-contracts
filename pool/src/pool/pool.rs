@@ -1,9 +1,12 @@
-use soroban_sdk::{map, panic_with_error, unwrap::UnwrapOptimized, vec, Address, Env, Map, Vec};
+use soroban_sdk::{
+    map, panic_with_error, token::TokenClient, unwrap::UnwrapOptimized, vec, Address, Env, Map, Vec,
+};
 
 use sep_40_oracle::{Asset, PriceFeedClient};
 
 use crate::{
     errors::PoolError,
+    reflector_oracle,
     storage::{self, PoolConfig},
     Positions,
 };
@@ -93,7 +96,7 @@ impl Pool {
     pub fn require_under_max(&self, e: &Env, positions: &Positions, previous_num: u32) {
         let new_num = positions.effective_count();
         if new_num > previous_num && self.config.max_positions < new_num {
-            panic_with_error!(e, PoolError::MaxPositionsExceeded)
+            // panic_with_error!(e, PoolError::MaxPositionsExceeded) // note: no need to panic here, we don't execute unsuccessful transactions in catchups.
         }
     }
 
@@ -122,10 +125,18 @@ impl Pool {
         }
         let oracle_client = PriceFeedClient::new(e, &self.config.oracle);
         let oracle_asset = Asset::Stellar(asset.clone());
+
+        /*let price_data = reflector_oracle::get_token_amount_in_usdc_value(
+            e,
+            &self.config.oracle,
+            &TokenClient::new(&e, &asset),
+            1,
+        );*/
         let price_data = oracle_client.lastprice(&oracle_asset).unwrap_optimized();
-        if price_data.timestamp + 24 * 60 * 60 < e.ledger().timestamp() {
-            panic_with_error!(e, PoolError::StalePrice);
-        }
+
+        //if price_data.timestamp + 24 * 60 * 60 < e.ledger().timestamp() {
+        //    panic_with_error!(e, PoolError::StalePrice);
+        //}
         self.prices.set(asset.clone(), price_data.price);
         price_data.price
     }

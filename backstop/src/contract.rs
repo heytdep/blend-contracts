@@ -9,6 +9,112 @@ use soroban_sdk::{
     contract, contractclient, contractimpl, panic_with_error, Address, Env, Symbol, Vec,
 };
 
+pub(crate) mod retroshades {
+    use retroshade_sdk::Retroshade;
+    use soroban_sdk::{contracttype, Address, Symbol, Vec};
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct CollateralActionInfo {
+        pub pool: Address,
+        pub reserve_address: Address,
+        pub user_address: Address,
+        pub action_type: Symbol,
+        pub amount: i128,
+        pub b_tokens: i128,
+        pub user_reserve_total_supply: i128,
+        pub user_collateral_supply: i128,
+        pub user_updated_emissions: i128,
+        pub reserve_supply: i128,
+        pub reserve_liabilities: i128,
+        pub usdc_amount: i128,
+        pub usdc_reserve_supply: i128,
+        pub usdc_reserve_liabilities: i128,
+        pub usdc_user_reserve_total_supply: i128,
+        pub usdc_user_collateral_supply: i128,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct BorrowActionInfo {
+        pub pool: Address,
+        pub reserve_address: Address,
+        pub user_address: Address,
+        pub action_type: Symbol,
+        pub amount: i128,
+        pub d_tokens: i128,
+        pub utilization_rate: i128,
+
+        pub user_reserve_total_supply: i128,
+        pub user_liabilities: i128,
+        pub user_updated_emissions: i128,
+
+        pub reserve_supply: i128,
+        pub reserve_liabilities: i128,
+        pub usdc_amount: i128,
+        pub usdc_reserve_supply: i128,
+        pub usdc_reserve_liabilities: i128,
+        pub usdc_user_reserve_total_supply: i128,
+        pub usdc_user_liabilities: i128,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct FillAuctionActionInfo {
+        pub pool: Address,
+        pub liquidator_address: Address,
+        pub liquidatee_address: Address,
+
+        pub auction_type: u32,
+        pub percent_filled: i128,
+        pub health: i128,
+
+        pub backstop_balance_change: i128,
+        pub asset_changes: Vec<Address>,
+        pub amount_changes: Vec<i128>,
+
+        pub to_fill_bid_assets: Vec<Address>,
+        pub to_fill_bid_amounts: Vec<i128>,
+        pub to_fill_bid_usdc_amounts: Vec<i128>,
+        pub to_fill_lot_assets: Vec<Address>,
+        pub to_fill_lot_amounts: Vec<i128>,
+        pub to_fill_lot_usdc_amounts: Vec<i128>,
+        pub remaining_bid_assets: Vec<Address>,
+        pub remaining_bid_amounts: Vec<i128>,
+        pub remaining_bid_usdc_amounts: Vec<i128>,
+        pub remaining_lot_assets: Vec<Address>,
+        pub remaining_lot_amounts: Vec<i128>,
+        pub remaining_lot_usdc_amounts: Vec<i128>,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct ClaimActionInfo {
+        pub pool: Address,
+
+        pub user: Address,
+        pub to: Address,
+
+        pub total_claimed: i128,
+        pub claimed_reserves_idxs: Vec<u32>,
+        pub claimed_user_balance: Vec<i128>,
+        pub claimed_amounts: Vec<i128>,
+        pub reserves_claimed_ratio: Vec<i128>,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+}
+
 /// ### Backstop
 ///
 /// A backstop module for the Blend protocol's Isolated Lending Pools

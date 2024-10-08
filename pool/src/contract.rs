@@ -4,7 +4,114 @@ use crate::{
     pool::{self, Positions, Request},
     storage::{self, ReserveConfig},
 };
-use soroban_sdk::{contract, contractclient, contractimpl, Address, Env, String, Symbol, Vec};
+use retroshades::ClaimActionInfo;
+use soroban_sdk::{contract, contractclient, contractimpl, vec, Address, Env, String, Symbol, Vec};
+
+pub(crate) mod retroshades {
+    use retroshade_sdk::Retroshade;
+    use soroban_sdk::{contracttype, Address, Symbol, Vec};
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct CollateralActionInfo {
+        pub pool: Address,
+        pub reserve_address: Address,
+        pub user_address: Address,
+        pub action_type: Symbol,
+        pub amount: i128,
+        pub b_tokens: i128,
+        pub user_reserve_total_supply: i128,
+        pub user_collateral_supply: i128,
+        pub user_updated_emissions: i128,
+        pub reserve_supply: i128,
+        pub reserve_liabilities: i128,
+        pub usdc_amount: i128,
+        pub usdc_reserve_supply: i128,
+        pub usdc_reserve_liabilities: i128,
+        pub usdc_user_reserve_total_supply: i128,
+        pub usdc_user_collateral_supply: i128,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct BorrowActionInfo {
+        pub pool: Address,
+        pub reserve_address: Address,
+        pub user_address: Address,
+        pub action_type: Symbol,
+        pub amount: i128,
+        pub d_tokens: i128,
+        pub utilization_rate: i128,
+
+        pub user_reserve_total_supply: i128,
+        pub user_liabilities: i128,
+        pub user_updated_emissions: i128,
+
+        pub reserve_supply: i128,
+        pub reserve_liabilities: i128,
+        pub usdc_amount: i128,
+        pub usdc_reserve_supply: i128,
+        pub usdc_reserve_liabilities: i128,
+        pub usdc_user_reserve_total_supply: i128,
+        pub usdc_user_liabilities: i128,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct FillAuctionActionInfo {
+        pub pool: Address,
+        pub liquidator_address: Address,
+        pub liquidatee_address: Address,
+
+        pub auction_type: u32,
+        pub percent_filled: i128,
+        pub health: i128,
+
+        pub backstop_balance_change: i128,
+        pub asset_changes: Vec<Address>,
+        pub amount_changes: Vec<i128>,
+
+        pub to_fill_bid_assets: Vec<Address>,
+        pub to_fill_bid_amounts: Vec<i128>,
+        pub to_fill_bid_usdc_amounts: Vec<i128>,
+        pub to_fill_lot_assets: Vec<Address>,
+        pub to_fill_lot_amounts: Vec<i128>,
+        pub to_fill_lot_usdc_amounts: Vec<i128>,
+        pub remaining_bid_assets: Vec<Address>,
+        pub remaining_bid_amounts: Vec<i128>,
+        pub remaining_bid_usdc_amounts: Vec<i128>,
+        pub remaining_lot_assets: Vec<Address>,
+        pub remaining_lot_amounts: Vec<i128>,
+        pub remaining_lot_usdc_amounts: Vec<i128>,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+
+    #[contracttype]
+    #[derive(Retroshade)]
+    pub struct ClaimActionInfo {
+        pub pool: Address,
+
+        pub user: Address,
+        pub to: Address,
+
+        pub total_claimed: i128,
+        pub claimed_reserves_idxs: Vec<u32>,
+        pub claimed_user_balance: Vec<i128>,
+        pub claimed_amounts: Vec<i128>,
+        pub reserves_claimed_ratio: Vec<i128>,
+
+        pub ledger: u32,
+        pub timestamp: u64,
+    }
+}
 
 /// ### Pool
 ///
@@ -381,15 +488,48 @@ impl Pool for PoolContract {
 
         let amount_claimed = emissions::execute_claim(&e, &from, &reserve_token_ids, &to);
 
+        ClaimActionInfo {
+            pool: e.current_contract_address(),
+            user: from.clone(),
+            to,
+            total_claimed: amount_claimed.0,
+            claimed_reserves_idxs: if amount_claimed.1.len() == 0 {
+                vec![&e, 0]
+            } else {
+                amount_claimed.1
+            },
+            claimed_user_balance: if amount_claimed.2.len() == 0 {
+                vec![&e, 0]
+            } else {
+                amount_claimed.2
+            },
+            claimed_amounts: if amount_claimed.3.len() == 0 {
+                vec![&e, 0]
+            } else {
+                amount_claimed.3
+            },
+            reserves_claimed_ratio: if amount_claimed.4.len() == 0 {
+                vec![&e, 0]
+            } else {
+                amount_claimed.4
+            },
+
+            ledger: e.ledger().sequence(),
+            timestamp: e.ledger().timestamp(),
+        }
+        .emit(&e);
+
         e.events().publish(
             (Symbol::new(&e, "claim"), from),
-            (reserve_token_ids, amount_claimed),
+            (reserve_token_ids, amount_claimed.0),
         );
 
-        amount_claimed
+        amount_claimed.0
     }
 
     /***** Auction / Liquidation Functions *****/
+
+    // Note: we don't need to index the auctions. We let the zephyr programs handle these.
 
     fn new_liquidation_auction(e: Env, user: Address, percent_liquidated: u64) -> AuctionData {
         let auction_data = auctions::create_liquidation(&e, &user, percent_liquidated);

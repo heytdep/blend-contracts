@@ -69,7 +69,15 @@ pub fn calc_accrual(
 
     // update rate_modifier
     // scale delta blocks and util dif to 9 decimals
+
+    let last_time = if last_time > e.ledger().timestamp() {
+        (e.ledger().timestamp() - 500)
+    } else {
+        last_time
+    };
+
     let delta_time_scaled = i128(e.ledger().timestamp() - last_time) * SCALAR_9;
+
     let util_dif_scaled = (cur_util - target_util) * 100;
     let new_ir_mod: i128;
     if util_dif_scaled >= 0 {

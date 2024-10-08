@@ -75,7 +75,7 @@ pub fn fill_interest_auction(
     pool: &mut Pool,
     auction_data: &AuctionData,
     filler: &Address,
-) {
+) -> (i128, Vec<Address>, Vec<i128>) {
     // bid only contains the Backstop token
     let backstop = storage::get_backstop(e);
     if filler.clone() == backstop {
@@ -91,17 +91,26 @@ pub fn fill_interest_auction(
         &backstop_token_bid_amount,
     );
 
+    let mut assets = Vec::new(&e);
+    let mut amounts = Vec::new(&e);
+
     // lot contains underlying tokens, but the backstop credit must be updated on the reserve
     for (res_asset_address, lot_amount) in auction_data.lot.iter() {
         let mut reserve = pool.load_reserve(e, &res_asset_address, true);
         reserve.backstop_credit -= lot_amount;
         pool.cache_reserve(reserve);
+
+        assets.push_back(res_asset_address.clone());
+        amounts.push_back(lot_amount);
+
         TokenClient::new(e, &res_asset_address).transfer(
             &e.current_contract_address(),
             filler,
             &lot_amount,
         );
     }
+
+    (backstop_token_bid_amount, assets, amounts)
 }
 
 #[cfg(test)]

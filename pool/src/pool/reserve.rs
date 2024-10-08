@@ -43,6 +43,7 @@ impl Reserve {
     pub fn load(e: &Env, pool_config: &PoolConfig, asset: &Address) -> Reserve {
         let reserve_config = storage::get_res_config(e, asset);
         let reserve_data = storage::get_res_data(e, asset);
+
         let mut reserve = Reserve {
             asset: asset.clone(),
             index: reserve_config.index,
@@ -68,14 +69,13 @@ impl Reserve {
             reserve.last_time = e.ledger().timestamp();
             return reserve;
         }
-
         let cur_util = reserve.utilization();
+
         if cur_util == 0 {
             // if there are no assets borrowed, we don't need to update the reserve
             reserve.last_time = e.ledger().timestamp();
             return reserve;
         }
-
         let (loan_accrual, new_ir_mod) = calc_accrual(
             e,
             &reserve_config,
@@ -83,6 +83,7 @@ impl Reserve {
             reserve.ir_mod,
             reserve.last_time,
         );
+
         reserve.ir_mod = new_ir_mod;
 
         let pre_update_supply = reserve.total_supply();

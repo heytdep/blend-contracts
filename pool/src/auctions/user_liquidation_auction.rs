@@ -1,7 +1,7 @@
 use cast::i128;
 use soroban_fixed_point_math::FixedPoint;
 use soroban_sdk::unwrap::UnwrapOptimized;
-use soroban_sdk::{map, panic_with_error, Address, Env};
+use soroban_sdk::{map, panic_with_error, vec, Address, Env, Vec};
 
 use crate::auctions::auction::AuctionData;
 use crate::pool::{Pool, PositionData, User};
@@ -125,11 +125,14 @@ pub fn fill_user_liq_auction(
     auction_data: &AuctionData,
     user: &Address,
     filler_state: &mut User,
-) {
+) -> (i128, Vec<Address>, Vec<i128>) {
     let mut user_state = User::load(e, user);
+
     user_state.rm_positions(e, pool, auction_data.lot.clone(), auction_data.bid.clone());
     filler_state.add_positions(e, pool, auction_data.lot.clone(), auction_data.bid.clone());
     user_state.store(e);
+
+    (0, vec![&e, e.current_contract_address()], vec![&e, 0])
 }
 
 #[cfg(test)]

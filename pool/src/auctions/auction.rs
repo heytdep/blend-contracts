@@ -2,12 +2,13 @@ use crate::{
     constants::SCALAR_7,
     errors::PoolError,
     pool::{Pool, User},
-    storage,
+    reflector_oracle, storage,
 };
 use cast::i128;
 use soroban_fixed_point_math::FixedPoint;
 use soroban_sdk::{
-    contracttype, map, panic_with_error, unwrap::UnwrapOptimized, Address, Env, Map, Vec,
+    contracttype, map, panic_with_error, token::TokenClient, unwrap::UnwrapOptimized, Address, Env,
+    Map, String, Vec,
 };
 
 use super::{
@@ -130,6 +131,25 @@ pub fn delete_liquidation(e: &Env, user: &Address) {
     storage::del_auction(e, &(AuctionType::UserLiquidation as u32), user);
 }
 
+#[derive(Clone)]
+pub(crate) struct AuctionResult {
+    pub to_fill_auction_bid_assets: Vec<Address>,
+    pub to_fill_auction_bid_amounts: Vec<i128>,
+    pub to_fill_auction_bid_usdc_amounts: Vec<i128>,
+    pub to_fill_auction_lot_assets: Vec<Address>,
+    pub to_fill_auction_lot_amounts: Vec<i128>,
+    pub to_fill_auction_lot_usdc_amounts: Vec<i128>,
+    pub remaining_auction_bid_assets: Vec<Address>,
+    pub remaining_auction_bid_amounts: Vec<i128>,
+    pub remaining_auction_bid_usdc_amounts: Vec<i128>,
+    pub remaining_auction_lot_assets: Vec<Address>,
+    pub remaining_auction_lot_amounts: Vec<i128>,
+    pub remaining_auction_lot_usdc_amounts: Vec<i128>,
+    pub backstop_balance_change: i128,
+    pub asset_changes: Vec<Address>,
+    pub amount_changes: Vec<i128>,
+}
+
 /// Fills the auction from the invoker.
 ///
 /// ### Arguments
@@ -149,29 +169,117 @@ pub fn fill(
     user: &Address,
     filler_state: &mut User,
     percent_filled: u64,
-) {
+) -> AuctionResult {
     if user.clone() == filler_state.address {
         panic_with_error!(e, PoolError::InvalidLiquidation);
     }
+
     let auction_data = storage::get_auction(e, &auction_type, user);
     let (to_fill_auction, remaining_auction) = scale_auction(e, &auction_data, percent_filled);
-    match AuctionType::from_u32(e, auction_type) {
-        AuctionType::UserLiquidation => {
-            fill_user_liq_auction(e, pool, &to_fill_auction, user, filler_state)
-        }
-        AuctionType::BadDebtAuction => {
-            fill_bad_debt_auction(e, pool, &to_fill_auction, filler_state)
-        }
-        AuctionType::InterestAuction => {
-            fill_interest_auction(e, pool, &to_fill_auction, &filler_state.address)
-        }
-    };
+    // (amounts that were sent/taken from the backstop,
+    //  assets either of socialized debt or assets of the paid interest,
+    //  amounts either of liabilities in socialized debt or paid interest)
+    let (backstop_balance_change, asset_changes, amount_changes) =
+        match AuctionType::from_u32(e, auction_type) {
+            AuctionType::UserLiquidation => {
+                fill_user_liq_auction(e, pool, &to_fill_auction, user, filler_state)
+            }
+            AuctionType::BadDebtAuction => {
+                fill_bad_debt_auction(e, pool, &to_fill_auction, filler_state)
+            }
+            AuctionType::InterestAuction => {
+                fill_interest_auction(e, pool, &to_fill_auction, &filler_state.address)
+            }
+        };
 
-    if let Some(auction_to_store) = remaining_auction {
+    if let Some(auction_to_store) = remaining_auction.clone() {
         storage::set_auction(e, &auction_type, user, &auction_to_store);
     } else {
         storage::del_auction(e, &auction_type, user);
     }
+
+    let mut result = AuctionResult {
+        to_fill_auction_bid_assets: Vec::new(&e),
+        to_fill_auction_bid_amounts: Vec::new(&e),
+        to_fill_auction_bid_usdc_amounts: Vec::new(&e),
+        to_fill_auction_lot_assets: Vec::new(&e),
+        to_fill_auction_lot_amounts: Vec::new(&e),
+        to_fill_auction_lot_usdc_amounts: Vec::new(&e),
+        remaining_auction_bid_assets: Vec::new(&e),
+        remaining_auction_bid_amounts: Vec::new(&e),
+        remaining_auction_bid_usdc_amounts: Vec::new(&e),
+        remaining_auction_lot_assets: Vec::new(&e),
+        remaining_auction_lot_amounts: Vec::new(&e),
+        remaining_auction_lot_usdc_amounts: Vec::new(&e),
+        backstop_balance_change,
+        asset_changes,
+        amount_changes,
+    };
+
+    for (asset, amount) in to_fill_auction.bid.iter() {
+        result.to_fill_auction_bid_assets.push_back(asset.clone());
+        result.to_fill_auction_bid_amounts.push_back(amount);
+
+        let usdc_amount = reflector_oracle::get_token_amount_in_usdc_value(
+            &e,
+            &pool.config.oracle,
+            &TokenClient::new(&e, &asset),
+            amount,
+        );
+        result
+            .to_fill_auction_bid_usdc_amounts
+            .push_back(usdc_amount);
+    }
+
+    for (asset, amount) in to_fill_auction.lot.iter() {
+        result.to_fill_auction_lot_assets.push_back(asset.clone());
+        result.to_fill_auction_lot_amounts.push_back(amount);
+        let usdc_amount = reflector_oracle::get_token_amount_in_usdc_value(
+            &e,
+            &pool.config.oracle,
+            &TokenClient::new(&e, &asset),
+            amount,
+        );
+        result
+            .to_fill_auction_lot_usdc_amounts
+            .push_back(usdc_amount);
+    }
+
+    let remaining = remaining_auction.unwrap_or(AuctionData {
+        bid: map![e],
+        lot: map![e],
+        block: auction_data.block,
+    });
+
+    for (asset, amount) in remaining.bid.iter() {
+        result.remaining_auction_bid_assets.push_back(asset.clone());
+        result.remaining_auction_bid_amounts.push_back(amount);
+        let usdc_amount = reflector_oracle::get_token_amount_in_usdc_value(
+            &e,
+            &pool.config.oracle,
+            &TokenClient::new(&e, &asset),
+            amount,
+        );
+        result
+            .remaining_auction_bid_usdc_amounts
+            .push_back(usdc_amount);
+    }
+
+    for (asset, amount) in remaining.lot.iter() {
+        result.remaining_auction_lot_assets.push_back(asset.clone());
+        result.remaining_auction_lot_amounts.push_back(amount);
+        let usdc_amount = reflector_oracle::get_token_amount_in_usdc_value(
+            &e,
+            &pool.config.oracle,
+            &TokenClient::new(&e, &asset),
+            amount,
+        );
+        result
+            .remaining_auction_lot_usdc_amounts
+            .push_back(usdc_amount);
+    }
+
+    result
 }
 
 /// Scale the auction based on the percent being filled and the amount of blocks that have passed
@@ -188,7 +296,7 @@ pub fn fill(
 /// ### Panics
 /// If the percent filled is greater than 100 or less than 0
 #[allow(clippy::zero_prefixed_literal)]
-fn scale_auction(
+pub(crate) fn scale_auction(
     e: &Env,
     auction_data: &AuctionData,
     percent_filled: u64,
@@ -207,12 +315,12 @@ fn scale_auction(
         lot: map![e],
         block: auction_data.block,
     };
-
     // determine block based auction modifiers
     let bid_modifier: i128;
     let lot_modifier: i128;
     let per_block_scalar: i128 = 0_0050000; // modifier moves 0.5% every block
     let block_dif = i128(e.ledger().sequence() - auction_data.block);
+
     if block_dif > 200 {
         // lot 100%, bid scaling down from 100% to 0%
         lot_modifier = SCALAR_7;

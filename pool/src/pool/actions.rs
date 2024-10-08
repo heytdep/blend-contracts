@@ -1,10 +1,14 @@
-use soroban_sdk::Map;
-use soroban_sdk::{contracttype, panic_with_error, Address, Env, Symbol, Vec};
+use soroban_sdk::token::TokenClient;
+use soroban_sdk::{contracttype, panic_with_error, vec, Address, Env, Symbol, Vec};
+use soroban_sdk::{symbol_short, Map};
 
+use crate::auctions::{scale_auction, AuctionResult};
+use crate::reflector_oracle;
+use crate::retroshades::{BorrowActionInfo, CollateralActionInfo, FillAuctionActionInfo};
 use crate::{auctions, errors::PoolError, validator::require_nonnegative};
 
 use super::pool::Pool;
-use super::User;
+use super::{PositionData, User};
 
 /// A request a user makes against the pool
 #[derive(Clone)]
@@ -85,6 +89,117 @@ impl Actions {
     }
 }
 
+fn emit_auction_retroshade(
+    e: &Env,
+    request: Request,
+    pool: &mut Pool,
+    from_state: &mut User,
+    result: AuctionResult,
+    auction_type: u32,
+) {
+    let health = PositionData::calculate_from_positions(e, pool, &from_state.positions);
+
+    let factor = health.as_health_factor();
+
+    let liquidator = request.address.clone();
+    let percent_filled = request.amount;
+    let backstop_balance_change = result.backstop_balance_change;
+
+    let remaining_auction_bid_assets = if result.remaining_auction_bid_assets.len() == 0 {
+        vec![&e, e.current_contract_address()]
+    } else {
+        result.remaining_auction_bid_assets
+    };
+    let remaining_auction_lot_assets = if result.remaining_auction_lot_assets.len() == 0 {
+        vec![&e, e.current_contract_address()]
+    } else {
+        result.remaining_auction_lot_assets
+    };
+    let to_fill_auction_bid_assets = if result.to_fill_auction_bid_assets.len() == 0 {
+        vec![&e, e.current_contract_address()]
+    } else {
+        result.to_fill_auction_bid_assets
+    };
+    let to_fill_auction_lot_assets = if result.to_fill_auction_lot_assets.len() == 0 {
+        vec![&e, e.current_contract_address()]
+    } else {
+        result.to_fill_auction_lot_assets
+    };
+
+    let to_fill_auction_bid_amounts = if result.to_fill_auction_bid_amounts.len() == 0 {
+        vec![&e, 0]
+    } else {
+        result.to_fill_auction_bid_amounts
+    };
+    let to_fill_auction_bid_usdc_amounts = if result.to_fill_auction_bid_usdc_amounts.len() == 0 {
+        vec![&e, 0]
+    } else {
+        result.to_fill_auction_bid_usdc_amounts
+    };
+    let to_fill_auction_lot_amounts = if result.to_fill_auction_lot_amounts.len() == 0 {
+        vec![&e, 0]
+    } else {
+        result.to_fill_auction_lot_amounts
+    };
+    let to_fill_auction_lot_usdc_amounts = if result.to_fill_auction_lot_usdc_amounts.len() == 0 {
+        vec![&e, 0]
+    } else {
+        result.to_fill_auction_lot_usdc_amounts
+    };
+    let remaining_auction_lot_amounts = if result.remaining_auction_lot_amounts.len() == 0 {
+        vec![&e, 0]
+    } else {
+        result.remaining_auction_lot_amounts
+    };
+    let remaining_auction_lot_usdc_amounts = if result.remaining_auction_lot_usdc_amounts.len() == 0
+    {
+        vec![&e, 0]
+    } else {
+        result.remaining_auction_lot_usdc_amounts
+    };
+    let remaining_auction_bid_amounts = if result.remaining_auction_bid_amounts.len() == 0 {
+        vec![&e, 0]
+    } else {
+        result.remaining_auction_bid_amounts
+    };
+    let remaining_auction_bid_usdc_amounts = if result.remaining_auction_bid_usdc_amounts.len() == 0
+    {
+        vec![&e, 0]
+    } else {
+        result.remaining_auction_bid_usdc_amounts
+    };
+
+    let asset_changes = result.asset_changes;
+    let amount_changes = result.amount_changes;
+
+    FillAuctionActionInfo {
+        pool: e.current_contract_address(),
+        liquidator_address: liquidator,
+        liquidatee_address: request.address.clone(),
+        auction_type,
+        percent_filled,
+        health: factor,
+        backstop_balance_change,
+        asset_changes,
+        amount_changes,
+        to_fill_bid_assets: to_fill_auction_bid_assets,
+        to_fill_bid_amounts: to_fill_auction_bid_amounts,
+        to_fill_bid_usdc_amounts: to_fill_auction_bid_usdc_amounts,
+        to_fill_lot_assets: to_fill_auction_lot_assets,
+        to_fill_lot_amounts: to_fill_auction_lot_amounts,
+        to_fill_lot_usdc_amounts: to_fill_auction_lot_usdc_amounts,
+        remaining_bid_assets: remaining_auction_bid_assets,
+        remaining_bid_amounts: remaining_auction_bid_amounts,
+        remaining_bid_usdc_amounts: remaining_auction_bid_usdc_amounts,
+        remaining_lot_assets: remaining_auction_lot_assets,
+        remaining_lot_amounts: remaining_auction_lot_amounts,
+        remaining_lot_usdc_amounts: remaining_auction_lot_usdc_amounts,
+        ledger: e.ledger().sequence(),
+        timestamp: e.ledger().timestamp(),
+    }
+    .emit(e);
+}
+
 /// Build a set of pool actions and the new positions from the supplied requests. Validates that the requests
 /// are valid based on the status and supported reserves in the pool.
 ///
@@ -155,9 +270,81 @@ pub fn build_actions_from_request(
             RequestType::SupplyCollateral => {
                 let mut reserve = pool.load_reserve(e, &request.address, true);
                 let b_tokens_minted = reserve.to_b_token_down(request.amount);
-                from_state.add_collateral(e, &mut reserve, b_tokens_minted);
+                let updated_emissions = from_state.add_collateral(e, &mut reserve, b_tokens_minted);
                 actions.add_for_spender_transfer(&reserve.asset, request.amount);
-                pool.cache_reserve(reserve);
+                pool.cache_reserve(reserve.clone());
+
+                // Retroshades logic
+                {
+                    let reserve_address = request.address.clone();
+                    let user_address = from.clone();
+                    let amount_supplied = request.amount;
+                    let b_tokens_minted = b_tokens_minted;
+
+                    let user_reserve_total_supply = from_state.get_total_supply(reserve.index);
+                    let user_collateral_supply = from_state.get_collateral(reserve.index);
+
+                    let user_updated_emissions = updated_emissions;
+                    let reserve_supply = reserve.total_supply();
+                    let reserve_liabilities = reserve.total_liabilities();
+
+                    let usdc_amount_supplied = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        amount_supplied,
+                    );
+                    let usdc_reserve_supply = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_supply,
+                    );
+                    let usdc_reserve_liabilities = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_liabilities,
+                    );
+                    let usdc_user_reserve_total_supply =
+                        reflector_oracle::get_token_amount_in_usdc_value(
+                            &e,
+                            &pool.config.oracle,
+                            &TokenClient::new(&e, &reserve_address),
+                            user_reserve_total_supply,
+                        );
+                    let usdc_user_collateral_supply =
+                        reflector_oracle::get_token_amount_in_usdc_value(
+                            &e,
+                            &pool.config.oracle,
+                            &TokenClient::new(&e, &reserve_address),
+                            user_collateral_supply,
+                        );
+
+                    CollateralActionInfo {
+                        pool: e.current_contract_address(),
+                        reserve_address,
+                        user_address,
+                        action_type: symbol_short!("supply"),
+                        amount: amount_supplied,
+                        b_tokens: b_tokens_minted,
+                        user_reserve_total_supply,
+                        user_collateral_supply,
+                        user_updated_emissions,
+                        reserve_supply,
+                        reserve_liabilities,
+                        usdc_amount: usdc_amount_supplied,
+                        usdc_reserve_supply,
+                        usdc_reserve_liabilities,
+                        usdc_user_collateral_supply,
+                        usdc_user_reserve_total_supply,
+
+                        ledger: e.ledger().sequence(),
+                        timestamp: e.ledger().timestamp(),
+                    }
+                    .emit(&e);
+                }
+
                 e.events().publish(
                     (
                         Symbol::new(e, "supply_collateral"),
@@ -176,10 +363,82 @@ pub fn build_actions_from_request(
                     to_burn = cur_b_tokens;
                     tokens_out = reserve.to_asset_from_b_token(cur_b_tokens);
                 }
-                from_state.remove_collateral(e, &mut reserve, to_burn);
+                let updated_emissions = from_state.remove_collateral(e, &mut reserve, to_burn);
                 actions.add_for_pool_transfer(&reserve.asset, tokens_out);
                 check_health = true;
-                pool.cache_reserve(reserve);
+                pool.cache_reserve(reserve.clone());
+
+                // Retroshades logic
+                {
+                    let reserve_address = request.address.clone();
+                    let user_address = from.clone();
+                    let amount_withdrawn = tokens_out;
+                    let b_tokens_burned = to_burn;
+
+                    let user_reserve_total_supply = from_state.get_total_supply(reserve.index);
+                    let user_collateral_supply = from_state.get_collateral(reserve.index);
+
+                    let user_updated_emissions = updated_emissions;
+                    let reserve_supply = reserve.total_supply();
+                    let reserve_liabilities = reserve.total_liabilities();
+
+                    let usdc_amount_withdrawn = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        amount_withdrawn,
+                    );
+                    let usdc_reserve_supply = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_supply,
+                    );
+                    let usdc_reserve_liabilities = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_liabilities,
+                    );
+                    let usdc_user_reserve_total_supply =
+                        reflector_oracle::get_token_amount_in_usdc_value(
+                            &e,
+                            &pool.config.oracle,
+                            &TokenClient::new(&e, &reserve_address),
+                            user_reserve_total_supply,
+                        );
+                    let usdc_user_collateral_supply =
+                        reflector_oracle::get_token_amount_in_usdc_value(
+                            &e,
+                            &pool.config.oracle,
+                            &TokenClient::new(&e, &reserve_address),
+                            user_collateral_supply,
+                        );
+
+                    CollateralActionInfo {
+                        pool: e.current_contract_address(),
+                        reserve_address,
+                        user_address,
+                        action_type: symbol_short!("withdraw"),
+                        amount: amount_withdrawn,
+                        b_tokens: b_tokens_burned,
+                        user_reserve_total_supply,
+                        user_collateral_supply,
+                        user_updated_emissions,
+                        reserve_supply,
+                        reserve_liabilities,
+                        usdc_amount: usdc_amount_withdrawn,
+                        usdc_reserve_supply,
+                        usdc_reserve_liabilities,
+                        usdc_user_collateral_supply,
+                        usdc_user_reserve_total_supply,
+
+                        ledger: e.ledger().sequence(),
+                        timestamp: e.ledger().timestamp(),
+                    }
+                    .emit(&e);
+                }
+
                 e.events().publish(
                     (
                         Symbol::new(e, "withdraw_collateral"),
@@ -189,14 +448,85 @@ pub fn build_actions_from_request(
                     (tokens_out, to_burn),
                 );
             }
+
             RequestType::Borrow => {
                 let mut reserve = pool.load_reserve(e, &request.address, true);
                 let d_tokens_minted = reserve.to_d_token_up(request.amount);
-                from_state.add_liabilities(e, &mut reserve, d_tokens_minted);
+                let updated_emissions =
+                    from_state.add_liabilities(e, &mut reserve, d_tokens_minted);
                 reserve.require_utilization_below_max(e);
                 actions.add_for_pool_transfer(&reserve.asset, request.amount);
                 check_health = true;
-                pool.cache_reserve(reserve);
+                pool.cache_reserve(reserve.clone());
+
+                // retroshades logic
+                {
+                    let reserve_address = request.address.clone();
+                    let user_address = from.clone();
+                    let user_reserve_total_supply = from_state.get_total_supply(reserve.index);
+                    let user_liabilities = from_state.get_liabilities(reserve.index);
+
+                    let user_updated_emissions = updated_emissions;
+                    let reserve_supply = reserve.total_supply();
+                    let reserve_liabilities = reserve.total_liabilities();
+
+                    let usdc_amount_withdrawn = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        request.amount,
+                    );
+                    let usdc_reserve_supply = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_supply,
+                    );
+                    let usdc_reserve_liabilities = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_liabilities,
+                    );
+                    let usdc_user_reserve_total_supply =
+                        reflector_oracle::get_token_amount_in_usdc_value(
+                            &e,
+                            &pool.config.oracle,
+                            &TokenClient::new(&e, &reserve_address),
+                            user_reserve_total_supply,
+                        );
+                    let usdc_user_liabilities = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        user_liabilities,
+                    );
+
+                    BorrowActionInfo {
+                        pool: e.current_contract_address(),
+                        reserve_address,
+                        user_address,
+                        action_type: symbol_short!("borrow"),
+                        amount: request.amount,
+                        d_tokens: d_tokens_minted,
+                        user_reserve_total_supply,
+                        user_liabilities,
+                        user_updated_emissions,
+                        reserve_supply,
+                        reserve_liabilities,
+                        usdc_amount: usdc_amount_withdrawn,
+                        usdc_reserve_supply,
+                        usdc_reserve_liabilities,
+                        usdc_user_liabilities,
+                        usdc_user_reserve_total_supply,
+                        utilization_rate: reserve.utilization(),
+
+                        ledger: e.ledger().sequence(),
+                        timestamp: e.ledger().timestamp(),
+                    }
+                    .emit(&e);
+                }
+
                 e.events().publish(
                     (
                         Symbol::new(e, "borrow"),
@@ -211,11 +541,21 @@ pub fn build_actions_from_request(
                 let cur_d_tokens = from_state.get_liabilities(reserve.index);
                 let d_tokens_burnt = reserve.to_d_token_down(request.amount);
                 actions.add_for_spender_transfer(&reserve.asset, request.amount);
+
+                let updated_emissions;
+                let amount_to_refund;
+                let d_burnt_tokens;
+                let amount = request.amount;
+
                 if d_tokens_burnt > cur_d_tokens {
-                    let amount_to_refund =
-                        request.amount - reserve.to_asset_from_d_token(cur_d_tokens);
+                    amount_to_refund = request.amount - reserve.to_asset_from_d_token(cur_d_tokens);
+                    d_burnt_tokens = cur_d_tokens;
+
                     require_nonnegative(e, &amount_to_refund);
-                    from_state.remove_liabilities(e, &mut reserve, cur_d_tokens);
+
+                    updated_emissions =
+                        from_state.remove_liabilities(e, &mut reserve, cur_d_tokens);
+
                     actions.add_for_pool_transfer(&reserve.asset, amount_to_refund);
                     e.events().publish(
                         (
@@ -226,7 +566,10 @@ pub fn build_actions_from_request(
                         (request.amount - amount_to_refund, cur_d_tokens),
                     );
                 } else {
-                    from_state.remove_liabilities(e, &mut reserve, d_tokens_burnt);
+                    d_burnt_tokens = d_tokens_burnt;
+                    updated_emissions =
+                        from_state.remove_liabilities(e, &mut reserve, d_tokens_burnt);
+
                     e.events().publish(
                         (
                             Symbol::new(e, "repay"),
@@ -236,10 +579,79 @@ pub fn build_actions_from_request(
                         (request.amount, d_tokens_burnt),
                     );
                 }
+
+                // retroshades logic
+                {
+                    let reserve_address = request.address.clone();
+                    let user_address = from.clone();
+                    let user_reserve_total_supply = from_state.get_total_supply(reserve.index);
+                    let user_liabilities = from_state.get_liabilities(reserve.index);
+
+                    let user_updated_emissions = updated_emissions;
+                    let reserve_supply = reserve.total_supply();
+                    let reserve_liabilities = reserve.total_liabilities();
+
+                    let usdc_amount = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        amount,
+                    );
+                    let usdc_reserve_supply = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_supply,
+                    );
+                    let usdc_reserve_liabilities = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        reserve_liabilities,
+                    );
+                    let usdc_user_reserve_total_supply =
+                        reflector_oracle::get_token_amount_in_usdc_value(
+                            &e,
+                            &pool.config.oracle,
+                            &TokenClient::new(&e, &reserve_address),
+                            user_reserve_total_supply,
+                        );
+                    let usdc_user_liabilities = reflector_oracle::get_token_amount_in_usdc_value(
+                        &e,
+                        &pool.config.oracle,
+                        &TokenClient::new(&e, &reserve_address),
+                        user_liabilities,
+                    );
+
+                    BorrowActionInfo {
+                        pool: e.current_contract_address(),
+                        reserve_address,
+                        user_address,
+                        action_type: symbol_short!("repay"),
+                        amount,
+                        d_tokens: d_burnt_tokens,
+                        user_reserve_total_supply,
+                        user_liabilities,
+                        user_updated_emissions,
+                        reserve_supply,
+                        reserve_liabilities,
+                        usdc_amount,
+                        usdc_reserve_supply,
+                        usdc_reserve_liabilities,
+                        usdc_user_liabilities,
+                        usdc_user_reserve_total_supply,
+                        utilization_rate: reserve.utilization(),
+
+                        ledger: e.ledger().sequence(),
+                        timestamp: e.ledger().timestamp(),
+                    }
+                    .emit(&e);
+                }
+
                 pool.cache_reserve(reserve);
             }
             RequestType::FillUserLiquidationAuction => {
-                auctions::fill(
+                let result = auctions::fill(
                     e,
                     pool,
                     0,
@@ -248,6 +660,9 @@ pub fn build_actions_from_request(
                     request.amount as u64,
                 );
                 check_health = true;
+
+                // retroshades logic
+                emit_auction_retroshade(e, request.clone(), pool, &mut from_state, result, 0);
 
                 e.events().publish(
                     (
@@ -260,7 +675,7 @@ pub fn build_actions_from_request(
             }
             RequestType::FillBadDebtAuction => {
                 // Note: will fail if input address is not the backstop since there cannot be a bad debt auction for a different address in storage
-                auctions::fill(
+                let result = auctions::fill(
                     e,
                     pool,
                     1,
@@ -269,6 +684,9 @@ pub fn build_actions_from_request(
                     request.amount as u64,
                 );
                 check_health = true;
+
+                // retroshades logic
+                emit_auction_retroshade(e, request.clone(), pool, &mut from_state, result, 1);
 
                 e.events().publish(
                     (
@@ -279,9 +697,10 @@ pub fn build_actions_from_request(
                     (from.clone(), request.amount),
                 );
             }
+
             RequestType::FillInterestAuction => {
                 // Note: will fail if input address is not the backstop since there cannot be an interest auction for a different address in storage
-                auctions::fill(
+                let result = auctions::fill(
                     e,
                     pool,
                     2,
@@ -289,6 +708,10 @@ pub fn build_actions_from_request(
                     &mut from_state,
                     request.amount as u64,
                 );
+
+                // retroshades logic
+                emit_auction_retroshade(e, request.clone(), pool, &mut from_state, result, 2);
+
                 e.events().publish(
                     (
                         Symbol::new(e, "fill_auction"),
@@ -307,6 +730,7 @@ pub fn build_actions_from_request(
                     (),
                 );
             }
+            _ => (),
         }
     }
 

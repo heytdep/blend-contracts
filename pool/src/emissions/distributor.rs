@@ -1,3 +1,4 @@
+use crate::pool::Pool;
 use cast::i128;
 use sep_41_token::TokenClient;
 use soroban_fixed_point_math::FixedPoint;
@@ -12,10 +13,21 @@ use crate::{
 };
 
 /// Performs a claim against the given "reserve_token_ids" for "from"
-pub fn execute_claim(e: &Env, from: &Address, reserve_token_ids: &Vec<u32>, to: &Address) -> i128 {
+pub fn execute_claim(
+    e: &Env,
+    from: &Address,
+    reserve_token_ids: &Vec<u32>,
+    to: &Address,
+) -> (i128, Vec<u32>, Vec<i128>, Vec<i128>, Vec<i128>) {
     let from_state = User::load(e, from);
     let reserve_list = storage::get_res_list(e);
     let mut to_claim = 0;
+
+    let mut claimed_reserves = Vec::new(&e);
+    let mut claimed_user_balance = Vec::new(&e);
+    let mut claimed_amounts = Vec::new(&e);
+    let mut reserves_claimed_ratio = Vec::new(&e);
+
     for reserve_token_id in reserve_token_ids.clone() {
         let reserve_index = reserve_token_id / 2;
         let reserve_addr = reserve_list.get(reserve_index);
@@ -34,13 +46,23 @@ pub fn execute_claim(e: &Env, from: &Address, reserve_token_ids: &Vec<u32>, to: 
                     ),
                     _ => panic_with_error!(e, PoolError::BadRequest),
                 };
-                to_claim += claim_emissions(
+                let to_claim_now = claim_emissions(
                     e,
                     reserve_token_id,
                     supply,
                     10i128.pow(reserve_config.decimals),
                     from,
                     user_balance,
+                );
+                to_claim += to_claim_now;
+
+                claimed_amounts.push_back(to_claim_now);
+                claimed_user_balance.push_back(user_balance);
+                claimed_reserves.push_back(reserve_index);
+                reserves_claimed_ratio.push_back(
+                    user_balance
+                        .fixed_div_floor(to_claim, reserve_config.decimals as i128)
+                        .unwrap_or(0),
                 );
             }
             None => {
@@ -52,14 +74,22 @@ pub fn execute_claim(e: &Env, from: &Address, reserve_token_ids: &Vec<u32>, to: 
     if to_claim > 0 {
         let backstop = storage::get_backstop(e);
         let blnd_token = storage::get_blnd_token(e);
-        TokenClient::new(e, &blnd_token).transfer_from(
+        // Note: no need to ensure the transfer lands here because we already know that this
+        // was a succesful call when indexing.
+        TokenClient::new(e, &blnd_token).try_transfer_from(
             &e.current_contract_address(),
             &backstop,
             to,
             &to_claim,
         );
     }
-    to_claim
+    (
+        to_claim,
+        claimed_reserves,
+        claimed_user_balance,
+        claimed_amounts,
+        reserves_claimed_ratio,
+    )
 }
 
 /// Update the emissions information about a reserve token. Must be called before any update
@@ -83,7 +113,7 @@ pub fn update_emissions(
     supply_scalar: i128,
     user: &Address,
     balance: i128,
-) {
+) -> i128 {
     if let Some(res_emis_data) = update_emission_data(e, res_token_id, supply, supply_scalar) {
         update_user_emissions(
             e,
@@ -93,7 +123,9 @@ pub fn update_emissions(
             user,
             balance,
             false,
-        );
+        )
+    } else {
+        0
     }
 }
 
@@ -186,10 +218,19 @@ pub(super) fn update_emission_data_with_config(
         e.ledger().timestamp()
     };
 
-    let additional_idx = (i128(ledger_timestamp - token_emission_data.last_time)
-        * i128(emis_config.eps))
-    .fixed_div_floor(supply, supply_scalar)
-    .unwrap_optimized();
+    let additional_idx = if ledger_timestamp as i64 - token_emission_data.last_time as i64 > 0
+        && supply != 0
+        && emis_config.eps > 0
+    {
+        let delta = i128(ledger_timestamp - token_emission_data.last_time);
+
+        (delta * i128(emis_config.eps))
+            .fixed_div_floor(supply, supply_scalar)
+            .unwrap_optimized()
+    } else {
+        0
+    };
+
     let new_data = ReserveEmissionsData {
         index: additional_idx + token_emission_data.index,
         last_time: ledger_timestamp,
@@ -210,13 +251,20 @@ fn update_user_emissions(
     if let Some(user_data) = storage::get_user_emissions(e, user, &res_token_id) {
         if user_data.index != res_emis_data.index || claim {
             let mut accrual = user_data.accrued;
-            if balance != 0 {
-                let delta_index = res_emis_data.index - user_data.index;
-                require_nonnegative(e, &delta_index);
-                let to_accrue = balance
-                    .fixed_mul_floor(res_emis_data.index - user_data.index, supply_scalar)
-                    .unwrap_optimized();
-                accrual += to_accrue;
+
+            // If this is in a catchup that still doesn't support parallel state writes
+            // then the accrual is 0 to notify the API of this.
+            if res_emis_data.index - user_data.index >= 0 {
+                if balance != 0 {
+                    let delta_index = res_emis_data.index - user_data.index;
+                    require_nonnegative(e, &delta_index);
+                    let to_accrue = balance
+                        .fixed_mul_floor(res_emis_data.index - user_data.index, supply_scalar)
+                        .unwrap_optimized();
+                    accrual += to_accrue;
+                }
+            } else {
+                accrual = 0
             }
             return set_user_emissions(e, user, res_token_id, res_emis_data.index, accrual, claim);
         }

@@ -28,6 +28,7 @@ impl PositionData {
         let oracle_scalar = 10i128.pow(pool.load_price_decimals(e));
 
         let reserve_list = storage::get_res_list(e);
+
         let mut collateral_base = 0;
         let mut liability_base = 0;
         let mut collateral_raw = 0;
@@ -39,7 +40,7 @@ impl PositionData {
                 continue;
             }
             let reserve = pool.load_reserve(e, &reserve_list.get_unchecked(i), false);
-            let asset_to_base = pool.load_price(e, &reserve.asset);
+            let asset_to_base = 1;
 
             if b_token_balance > 0 {
                 // append users effective collateral to collateral_base
@@ -58,9 +59,19 @@ impl PositionData {
             if d_token_balance > 0 {
                 // append users effective liability to liability_base
                 let asset_liability = reserve.to_effective_asset_from_d_token(d_token_balance);
+                e.events().publish(
+                    (
+                        "asset_liability",
+                        asset_to_base,
+                        asset_liability,
+                        reserve.scalar,
+                    ),
+                    (),
+                );
                 liability_base += asset_to_base
                     .fixed_mul_ceil(asset_liability, reserve.scalar)
                     .unwrap_optimized();
+
                 liability_raw += asset_to_base
                     .fixed_mul_ceil(
                         reserve.to_asset_from_d_token(d_token_balance),
@@ -68,7 +79,6 @@ impl PositionData {
                     )
                     .unwrap_optimized();
             }
-
             pool.cache_reserve(reserve);
         }
 
@@ -85,7 +95,7 @@ impl PositionData {
     pub fn as_health_factor(&self) -> i128 {
         self.collateral_base
             .fixed_div_floor(self.liability_base, self.scalar)
-            .unwrap_optimized()
+            .unwrap_or(0)
     }
 
     // Check if the position data is over a maximum health factor

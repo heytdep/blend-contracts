@@ -7,7 +7,7 @@ use crate::{
 };
 use cast::i128;
 use soroban_fixed_point_math::FixedPoint;
-use soroban_sdk::{map, panic_with_error, unwrap::UnwrapOptimized, Address, Env, Symbol};
+use soroban_sdk::{map, panic_with_error, unwrap::UnwrapOptimized, Address, Env, Symbol, Vec};
 
 use super::{AuctionData, AuctionType};
 
@@ -74,7 +74,7 @@ pub fn fill_bad_debt_auction(
     pool: &mut Pool,
     auction_data: &AuctionData,
     filler_state: &mut User,
-) {
+) -> (i128, Vec<Address>, Vec<i128>) {
     let backstop_address = storage::get_backstop(e);
     if filler_state.address == backstop_address {
         panic_with_error!(e, PoolError::BadRequest);
@@ -94,6 +94,9 @@ pub fn fill_bad_debt_auction(
         &filler_state.address,
     );
 
+    let mut socialized_debt_assets = Vec::new(&e);
+    let mut socialized_debt_liabilities = Vec::new(&e);
+
     // If the backstop still has liabilities and less than 10% of the backstop threshold burn bad debt
     if !backstop_state.positions.liabilities.is_empty() {
         let pool_backstop_data = backstop_client.pool_data(&e.current_contract_address());
@@ -106,17 +109,34 @@ pub fn fill_bad_debt_auction(
                 let res_asset_address = reserve_list.get_unchecked(reserve_index);
                 rm_liabilities.set(res_asset_address.clone(), liability_balance);
 
+                socialized_debt_assets.push_back(res_asset_address.clone());
+                socialized_debt_liabilities.push_back(liability_balance);
+
                 e.events().publish(
                     (Symbol::new(e, "bad_debt"), backstop_address.clone()),
                     (res_asset_address, liability_balance),
                 );
             }
+
             // remove liability debtTokens from backstop resulting in a shared loss for
             // token suppliers
             backstop_state.rm_positions(e, pool, map![e], rm_liabilities);
         }
     }
     backstop_state.store(e);
+
+    if socialized_debt_assets.len() == 0 {
+        socialized_debt_assets.push_back(e.current_contract_address());
+    }
+    if socialized_debt_liabilities.len() == 0 {
+        socialized_debt_liabilities.push_back(0);
+    }
+
+    (
+        lot_amount,
+        socialized_debt_assets,
+        socialized_debt_liabilities,
+    )
 }
 
 #[cfg(test)]

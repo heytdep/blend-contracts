@@ -65,26 +65,28 @@ impl User {
 
     /// Add liabilities to the position expressed in debtTokens. Accrues emissions
     /// against the balance if necessary and updates the reserve's d_supply.
-    pub fn add_liabilities(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) {
+    pub fn add_liabilities(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) -> i128 {
         if amount == 0 {
             panic_with_error!(e, PoolError::InvalidDTokenMintAmount)
         }
         let balance = self.get_liabilities(reserve.index);
-        self.update_d_emissions(e, reserve, balance);
+        let updated_emissions = self.update_d_emissions(e, reserve, balance);
         self.positions
             .liabilities
             .set(reserve.index, balance + amount);
         reserve.d_supply += amount;
+
+        updated_emissions
     }
 
     /// Remove liabilities from the position expressed in debtTokens. Accrues emissions
     /// against the balance if necessary and updates the reserve's d_supply.
-    pub fn remove_liabilities(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) {
+    pub fn remove_liabilities(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) -> i128 {
         if amount == 0 {
             panic_with_error!(e, PoolError::InvalidDTokenBurnAmount)
         }
         let balance = self.get_liabilities(reserve.index);
-        self.update_d_emissions(e, reserve, balance);
+        let emissions = self.update_d_emissions(e, reserve, balance);
         let new_balance = balance - amount;
         require_nonnegative(e, &new_balance);
         if new_balance == 0 {
@@ -93,6 +95,8 @@ impl User {
             self.positions.liabilities.set(reserve.index, new_balance);
         }
         reserve.d_supply -= amount;
+
+        emissions
     }
 
     /// Get the collateralized blendToken position for the reserve at the given index
@@ -102,26 +106,30 @@ impl User {
 
     /// Add collateral to the position expressed in blendTokens. Accrues emissions
     /// against the balance if necessary and updates the reserve's b_supply.
-    pub fn add_collateral(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) {
+    pub fn add_collateral(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) -> (i128) {
         if amount == 0 {
             panic_with_error!(e, PoolError::InvalidBTokenMintAmount)
         }
         let balance = self.get_collateral(reserve.index);
-        self.update_b_emissions(e, reserve, self.get_total_supply(reserve.index));
+        let updated_emissions =
+            self.update_b_emissions(e, reserve, self.get_total_supply(reserve.index));
         self.positions
             .collateral
             .set(reserve.index, balance + amount);
         reserve.b_supply += amount;
+
+        updated_emissions
     }
 
     /// Remove collateral from the position expressed in blendTokens. Accrues emissions
     /// against the balance if necessary and updates the reserve's d_supply.
-    pub fn remove_collateral(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) {
+    pub fn remove_collateral(&mut self, e: &Env, reserve: &mut Reserve, amount: i128) -> (i128) {
         if amount == 0 {
             panic_with_error!(e, PoolError::InvalidBTokenBurnAmount)
         }
         let balance = self.get_collateral(reserve.index);
-        self.update_b_emissions(e, reserve, self.get_total_supply(reserve.index));
+        let updated_emissions =
+            self.update_b_emissions(e, reserve, self.get_total_supply(reserve.index));
         let new_balance = balance - amount;
         require_nonnegative(e, &new_balance);
         if new_balance == 0 {
@@ -130,6 +138,8 @@ impl User {
             self.positions.collateral.set(reserve.index, new_balance);
         }
         reserve.b_supply -= amount;
+
+        (updated_emissions)
     }
 
     /// Get the uncollateralized blendToken position for the reserve at the given index
@@ -212,7 +222,7 @@ impl User {
         }
     }
 
-    fn update_d_emissions(&self, e: &Env, reserve: &Reserve, amount: i128) {
+    fn update_d_emissions(&self, e: &Env, reserve: &Reserve, amount: i128) -> i128 {
         emissions::update_emissions(
             e,
             reserve.index * 2,
@@ -220,10 +230,10 @@ impl User {
             reserve.scalar,
             &self.address,
             amount,
-        );
+        )
     }
 
-    fn update_b_emissions(&self, e: &Env, reserve: &Reserve, amount: i128) {
+    fn update_b_emissions(&self, e: &Env, reserve: &Reserve, amount: i128) -> i128 {
         emissions::update_emissions(
             e,
             reserve.index * 2 + 1,
@@ -231,7 +241,7 @@ impl User {
             reserve.scalar,
             &self.address,
             amount,
-        );
+        )
     }
 }
 
