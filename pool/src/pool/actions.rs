@@ -4,7 +4,7 @@ use soroban_sdk::{symbol_short, Map};
 
 use crate::auctions::{scale_auction, AuctionResult};
 use crate::reflector_oracle;
-use crate::retroshades::{BorrowActionInfo, CollateralActionInfo, FillAuctionActionInfo};
+use crate::retroshades::{BorrowActionInfo, CollateralActionInfo};
 use crate::{auctions, errors::PoolError, validator::require_nonnegative};
 
 use super::pool::Pool;
@@ -87,117 +87,6 @@ impl Actions {
             amount + self.pool_transfer.get(asset.clone()).unwrap_or(0),
         );
     }
-}
-
-fn emit_auction_retroshade(
-    e: &Env,
-    request: Request,
-    pool: &mut Pool,
-    from_state: &mut User,
-    result: AuctionResult,
-    auction_type: u32,
-) {
-    let health = PositionData::calculate_from_positions(e, pool, &from_state.positions);
-
-    let factor = health.as_health_factor();
-
-    let liquidator = request.address.clone();
-    let percent_filled = request.amount;
-    let backstop_balance_change = result.backstop_balance_change;
-
-    let remaining_auction_bid_assets = if result.remaining_auction_bid_assets.len() == 0 {
-        vec![&e, e.current_contract_address()]
-    } else {
-        result.remaining_auction_bid_assets
-    };
-    let remaining_auction_lot_assets = if result.remaining_auction_lot_assets.len() == 0 {
-        vec![&e, e.current_contract_address()]
-    } else {
-        result.remaining_auction_lot_assets
-    };
-    let to_fill_auction_bid_assets = if result.to_fill_auction_bid_assets.len() == 0 {
-        vec![&e, e.current_contract_address()]
-    } else {
-        result.to_fill_auction_bid_assets
-    };
-    let to_fill_auction_lot_assets = if result.to_fill_auction_lot_assets.len() == 0 {
-        vec![&e, e.current_contract_address()]
-    } else {
-        result.to_fill_auction_lot_assets
-    };
-
-    let to_fill_auction_bid_amounts = if result.to_fill_auction_bid_amounts.len() == 0 {
-        vec![&e, 0]
-    } else {
-        result.to_fill_auction_bid_amounts
-    };
-    let to_fill_auction_bid_usdc_amounts = if result.to_fill_auction_bid_usdc_amounts.len() == 0 {
-        vec![&e, 0]
-    } else {
-        result.to_fill_auction_bid_usdc_amounts
-    };
-    let to_fill_auction_lot_amounts = if result.to_fill_auction_lot_amounts.len() == 0 {
-        vec![&e, 0]
-    } else {
-        result.to_fill_auction_lot_amounts
-    };
-    let to_fill_auction_lot_usdc_amounts = if result.to_fill_auction_lot_usdc_amounts.len() == 0 {
-        vec![&e, 0]
-    } else {
-        result.to_fill_auction_lot_usdc_amounts
-    };
-    let remaining_auction_lot_amounts = if result.remaining_auction_lot_amounts.len() == 0 {
-        vec![&e, 0]
-    } else {
-        result.remaining_auction_lot_amounts
-    };
-    let remaining_auction_lot_usdc_amounts = if result.remaining_auction_lot_usdc_amounts.len() == 0
-    {
-        vec![&e, 0]
-    } else {
-        result.remaining_auction_lot_usdc_amounts
-    };
-    let remaining_auction_bid_amounts = if result.remaining_auction_bid_amounts.len() == 0 {
-        vec![&e, 0]
-    } else {
-        result.remaining_auction_bid_amounts
-    };
-    let remaining_auction_bid_usdc_amounts = if result.remaining_auction_bid_usdc_amounts.len() == 0
-    {
-        vec![&e, 0]
-    } else {
-        result.remaining_auction_bid_usdc_amounts
-    };
-
-    let asset_changes = result.asset_changes;
-    let amount_changes = result.amount_changes;
-
-    FillAuctionActionInfo {
-        pool: e.current_contract_address(),
-        liquidator_address: liquidator,
-        liquidatee_address: request.address.clone(),
-        auction_type,
-        percent_filled,
-        health: factor,
-        backstop_balance_change,
-        asset_changes,
-        amount_changes,
-        to_fill_bid_assets: to_fill_auction_bid_assets,
-        to_fill_bid_amounts: to_fill_auction_bid_amounts,
-        to_fill_bid_usdc_amounts: to_fill_auction_bid_usdc_amounts,
-        to_fill_lot_assets: to_fill_auction_lot_assets,
-        to_fill_lot_amounts: to_fill_auction_lot_amounts,
-        to_fill_lot_usdc_amounts: to_fill_auction_lot_usdc_amounts,
-        remaining_bid_assets: remaining_auction_bid_assets,
-        remaining_bid_amounts: remaining_auction_bid_amounts,
-        remaining_bid_usdc_amounts: remaining_auction_bid_usdc_amounts,
-        remaining_lot_assets: remaining_auction_lot_assets,
-        remaining_lot_amounts: remaining_auction_lot_amounts,
-        remaining_lot_usdc_amounts: remaining_auction_lot_usdc_amounts,
-        ledger: e.ledger().sequence(),
-        timestamp: e.ledger().timestamp(),
-    }
-    .emit(e);
 }
 
 /// Build a set of pool actions and the new positions from the supplied requests. Validates that the requests
@@ -661,9 +550,6 @@ pub fn build_actions_from_request(
                 );
                 check_health = true;
 
-                // retroshades logic
-                emit_auction_retroshade(e, request.clone(), pool, &mut from_state, result, 0);
-
                 e.events().publish(
                     (
                         Symbol::new(e, "fill_auction"),
@@ -685,9 +571,6 @@ pub fn build_actions_from_request(
                 );
                 check_health = true;
 
-                // retroshades logic
-                emit_auction_retroshade(e, request.clone(), pool, &mut from_state, result, 1);
-
                 e.events().publish(
                     (
                         Symbol::new(e, "fill_auction"),
@@ -708,9 +591,6 @@ pub fn build_actions_from_request(
                     &mut from_state,
                     request.amount as u64,
                 );
-
-                // retroshades logic
-                emit_auction_retroshade(e, request.clone(), pool, &mut from_state, result, 2);
 
                 e.events().publish(
                     (

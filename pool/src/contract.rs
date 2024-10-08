@@ -4,12 +4,11 @@ use crate::{
     pool::{self, Positions, Request},
     storage::{self, ReserveConfig},
 };
-use retroshades::ClaimActionInfo;
 use soroban_sdk::{contract, contractclient, contractimpl, vec, Address, Env, String, Symbol, Vec};
 
 pub(crate) mod retroshades {
     use retroshade_sdk::Retroshade;
-    use soroban_sdk::{contracttype, Address, Symbol, Vec};
+    use soroban_sdk::{contracttype, Address, Symbol};
 
     #[contracttype]
     #[derive(Retroshade)]
@@ -57,56 +56,6 @@ pub(crate) mod retroshades {
         pub usdc_reserve_liabilities: i128,
         pub usdc_user_reserve_total_supply: i128,
         pub usdc_user_liabilities: i128,
-
-        pub ledger: u32,
-        pub timestamp: u64,
-    }
-
-    #[contracttype]
-    #[derive(Retroshade)]
-    pub struct FillAuctionActionInfo {
-        pub pool: Address,
-        pub liquidator_address: Address,
-        pub liquidatee_address: Address,
-
-        pub auction_type: u32,
-        pub percent_filled: i128,
-        pub health: i128,
-
-        pub backstop_balance_change: i128,
-        pub asset_changes: Vec<Address>,
-        pub amount_changes: Vec<i128>,
-
-        pub to_fill_bid_assets: Vec<Address>,
-        pub to_fill_bid_amounts: Vec<i128>,
-        pub to_fill_bid_usdc_amounts: Vec<i128>,
-        pub to_fill_lot_assets: Vec<Address>,
-        pub to_fill_lot_amounts: Vec<i128>,
-        pub to_fill_lot_usdc_amounts: Vec<i128>,
-        pub remaining_bid_assets: Vec<Address>,
-        pub remaining_bid_amounts: Vec<i128>,
-        pub remaining_bid_usdc_amounts: Vec<i128>,
-        pub remaining_lot_assets: Vec<Address>,
-        pub remaining_lot_amounts: Vec<i128>,
-        pub remaining_lot_usdc_amounts: Vec<i128>,
-
-        pub ledger: u32,
-        pub timestamp: u64,
-    }
-
-    #[contracttype]
-    #[derive(Retroshade)]
-    pub struct ClaimActionInfo {
-        pub pool: Address,
-
-        pub user: Address,
-        pub to: Address,
-
-        pub total_claimed: i128,
-        pub claimed_reserves_idxs: Vec<u32>,
-        pub claimed_user_balance: Vec<i128>,
-        pub claimed_amounts: Vec<i128>,
-        pub reserves_claimed_ratio: Vec<i128>,
 
         pub ledger: u32,
         pub timestamp: u64,
@@ -487,37 +436,6 @@ impl Pool for PoolContract {
         from.require_auth();
 
         let amount_claimed = emissions::execute_claim(&e, &from, &reserve_token_ids, &to);
-
-        ClaimActionInfo {
-            pool: e.current_contract_address(),
-            user: from.clone(),
-            to,
-            total_claimed: amount_claimed.0,
-            claimed_reserves_idxs: if amount_claimed.1.len() == 0 {
-                vec![&e, 0]
-            } else {
-                amount_claimed.1
-            },
-            claimed_user_balance: if amount_claimed.2.len() == 0 {
-                vec![&e, 0]
-            } else {
-                amount_claimed.2
-            },
-            claimed_amounts: if amount_claimed.3.len() == 0 {
-                vec![&e, 0]
-            } else {
-                amount_claimed.3
-            },
-            reserves_claimed_ratio: if amount_claimed.4.len() == 0 {
-                vec![&e, 0]
-            } else {
-                amount_claimed.4
-            },
-
-            ledger: e.ledger().sequence(),
-            timestamp: e.ledger().timestamp(),
-        }
-        .emit(&e);
 
         e.events().publish(
             (Symbol::new(&e, "claim"), from),
