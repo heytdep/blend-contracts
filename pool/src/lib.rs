@@ -93,7 +93,7 @@ mod reflector_oracle {
             None
         };
 
-        let result = if let Some(asset) = asset {
+        /*let result = if let Some(asset) = asset {
             /*let last_timestamp = e.try_invoke_contract::<u64, Val>(
                 &Address::from_string(&String::from_str(&e, REFLECTOR_ORACLE_OFFCHAIN_PRICES)),
                 &Symbol::new(&e, "last_timestamp"),
@@ -118,6 +118,36 @@ mod reflector_oracle {
                 (
                     Asset::Stellar(token_client.address.clone()),
                     /*last_timestamp.unwrap().unwrap(),*/
+                )
+                    .into_val(e),
+            )
+        };*/
+
+        let result = if let Some(asset) = asset {
+            let last_timestamp = e.try_invoke_contract::<u64, Val>(
+                &Address::from_string(&String::from_str(&e, REFLECTOR_ORACLE_OFFCHAIN_PRICES)),
+                &Symbol::new(&e, "last_timestamp"),
+                ().into_val(e),
+            );
+
+            e.try_invoke_contract::<Option<PriceData>, Val>(
+                &Address::from_string(&String::from_str(&e, REFLECTOR_ORACLE_OFFCHAIN_PRICES)),
+                &symbol_short!("lastprice"),
+                (asset, ).into_val(e),
+            )
+        } else {
+            let last_timestamp = e.try_invoke_contract::<u64, Val>(
+                &Address::from_string(&String::from_str(&e, REFLECTOR_ORACLE_PUBNET_PRICES)),
+                &Symbol::new(&e, "last_timestamp"),
+                ().into_val(e),
+            );
+
+            e.try_invoke_contract::<Option<PriceData>, Val>(
+                &Address::from_string(&String::from_str(&e, REFLECTOR_ORACLE_PUBNET_PRICES)),
+                &symbol_short!("lastprice"),
+                (
+                    Asset::Stellar(token_client.address.clone()),
+                    //last_timestamp.unwrap().unwrap(),
                 )
                     .into_val(e),
             )
